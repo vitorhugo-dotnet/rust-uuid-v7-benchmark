@@ -1,19 +1,17 @@
 #include <cuda_runtime.h>
-#include <curand_kernel.h>
 #include <chrono>
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <vector>
-#include <random>
-#if defined(_WIN32)
-#include <io.h>
-#include <fcntl.h>
-#endif
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
+#if defined(_WIN32)
+#include <io.h>
+#include <fcntl.h>
+#endif
 
 #define CUDA_CHECK(call) do { \
     cudaError_t err = (call); \
@@ -23,113 +21,90 @@
     } \
 } while (0)
 
-using State = curandStatePhilox4_32_10_t;
-
-__global__ void setup_rng(State* states, unsigned long long seed) {
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    curand_init(seed, static_cast<unsigned long long>(idx), 0ULL, &states[idx]);
-}
-
-__global__ void generate_v7(State* states, unsigned long long* checksum,
-                            unsigned long long unix_ms, unsigned int iterations) {
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    State rng = states[idx];
-    unsigned long long local = 0;
-    for (unsigned int i = 0; i < iterations; ++i) {
-        uint4 rnd = curand4(&rng);
-        // RFC 9562 layout: 48-bit UNIX milliseconds, version 7, 74 random bits, RFC variant.
-        // Philox is NOT a CSPRNG. These are synthetic v7-shaped values for a compute benchmark.
-        unsigned long long hi = ((unix_ms & 0xFFFFFFFFFFFFULL) << 16)
-                              | (7ULL << 12) | (static_cast<unsigned long long>(rnd.x) & 0xFFFULL);
-        unsigned long long lo = (0x2ULL << 62)
-                              | ((static_cast<unsigned long long>(rnd.y) << 32) | rnd.z) & 0x3FFFFFFFFFFFFFFFULL;
-        // Depend on every generated value so the optimizer can't remove generation.
-        local ^= hi ^ lo;
-    }
-    states[idx] = rng;
-    atomicXor(checksum, local);
-}
-
-
-// Raw binary stream format: per UUID, little-endian uint64_t high bits followed
-// by little-endian uint64_t low bits. Consumer converts to u128 and checks UUIDs.
 struct RawUuid {
     unsigned long long hi;
     unsigned long long lo;
 };
-static_assert(sizeof(RawUuid) == 16, "RawUuid must occupy 16 bytes");
+static_assert(sizeof(RawUuid) == 16, "RawUuid size");
 
-__global__ void stream_v7(State* states, RawUuid* out,
-                          unsigned long long unix_ms, unsigned int count) {
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int stride = gridDim.x * blockDim.x;
-    State rng = states[idx];
-    for (unsigned int i = idx; i < count; i += stride) {
-        uint4 rnd = curand4(&rng);
-        unsigned long long hi = ((unix_ms & 0xFFFFFFFFFFFFULL) << 16)
-                              | (7ULL << 12)
-                              | (static_cast<unsigned long long>(rnd.x) & 0xFFFULL);
-        unsigned long long lo = (0x2ULL << 62)
-                              | (((static_cast<unsigned long long>(rnd.y) << 32)
-                              | rnd.z) & 0x3FFFFFFFFFFFFFFFULL);
-        out[i] = {hi, lo};
+__host__ __device__ inline unsigned long long splitmix64(unsigned long long x) {
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+// Same two splitmix64 calls and bit layout as src/fair.rs.
+// Deterministic synthetic UUIDv7 workload; NOT cryptographically secure.
+__host__ __device__ inline RawUuid generate_id(unsigned long long seed,
+                                                unsigned long long index,
+                                                unsigned long long unix_ms) {
+    const auto a = splitmix64(seed ^ (index * 0x9E3779B97F4A7C15ULL));
+    const auto b = splitmix64(seed ^ (index * 0xBF58476D1CE4E5B9ULL) ^ 0xD1B54A32D192ED03ULL);
+    return {
+        ((unix_ms & 0xFFFFFFFFFFFFULL) << 16) | (7ULL << 12) | (a & 0xFFFULL),
+        (2ULL << 62) | (b & 0x3FFFFFFFFFFFFFFFULL)
+    };
+}
+
+__global__ void throughput_kernel(unsigned long long* checksum,
+                                  unsigned long long seed, unsigned long long start_index,
+                                  unsigned long long unix_ms, unsigned int iterations) {
+    const unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned long long offset = start_index + idx * iterations;
+    unsigned long long local = 0;
+    for (unsigned int i = 0; i < iterations; ++i) {
+        auto id = generate_id(seed, offset + i, unix_ms);
+        local ^= id.hi ^ id.lo;
     }
-    states[idx] = rng;
+    atomicXor(checksum, local);
+}
+
+__global__ void stream_kernel(RawUuid* out, unsigned int count,
+                              unsigned long long seed, unsigned long long start_index,
+                              unsigned long long unix_ms) {
+    const unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int stride = gridDim.x * blockDim.x;
+    for (unsigned int i = idx; i < count; i += stride) {
+        out[i] = generate_id(seed, start_index + i, unix_ms);
+    }
 }
 
 int stream_main(int argc, char** argv) {
-    if (argc != 6) {
-        std::cerr << "Usage: uuid-gpu stream SAMPLES BLOCKS THREADS_PER_BLOCK BATCH\n";
+    if (argc != 8) {
+        std::cerr << "Usage: uuid-gpu stream SAMPLES BLOCKS TPB BATCH SEED TIMESTAMP_MS\n";
         return 2;
     }
     try {
-        const unsigned long long samples = std::stoull(argv[2]);
-        const unsigned long blocks = std::stoul(argv[3]);
-        const unsigned long tpb = std::stoul(argv[4]);
-        const unsigned long batch = std::stoul(argv[5]);
-        if (!samples || !blocks || !tpb || tpb > 1024 || !batch || batch > 262144) {
-            throw std::runtime_error("Invalid stream arguments");
-        }
+        const auto samples = std::stoull(argv[2]);
+        const auto blocks = static_cast<unsigned int>(std::stoul(argv[3]));
+        const auto tpb = static_cast<unsigned int>(std::stoul(argv[4]));
+        const auto batch = static_cast<unsigned int>(std::stoul(argv[5]));
+        const auto seed = std::stoull(argv[6]);
+        const auto ms = std::stoull(argv[7]);
+        if (!samples || !blocks || !tpb || tpb > 1024 || !batch || batch > 262144)
+            throw std::runtime_error("Invalid stream parameters");
         CUDA_CHECK(cudaSetDevice(0));
-        const size_t nthreads = static_cast<size_t>(blocks) * tpb;
-        State* states = nullptr;
-        RawUuid* device_ids = nullptr;
-        CUDA_CHECK(cudaMalloc(&states, nthreads * sizeof(State)));
-        CUDA_CHECK(cudaMalloc(&device_ids, batch * sizeof(RawUuid)));
-        std::vector<RawUuid> host_ids(batch);
-        std::random_device random;
-        const unsigned long long seed = static_cast<unsigned long long>(
-            std::chrono::high_resolution_clock::now().time_since_epoch().count())
-            ^ (static_cast<unsigned long long>(random()) << 32) ^ random();
-        setup_rng<<<static_cast<unsigned int>(blocks), static_cast<unsigned int>(tpb)>>>(states, seed);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
+        RawUuid* gpu = nullptr;
+        CUDA_CHECK(cudaMalloc(&gpu, batch * sizeof(RawUuid)));
+        std::vector<RawUuid> host(batch);
 #if defined(_WIN32)
-        if (_setmode(_fileno(stdout), _O_BINARY) == -1) {
-            throw std::runtime_error("Cannot enable binary stdout on Windows");
-        }
+        if (_setmode(_fileno(stdout), _O_BINARY) == -1)
+            throw std::runtime_error("Cannot enable binary stdout");
 #endif
-        unsigned long long remaining = samples;
-        while (remaining > 0) {
-            const unsigned int count = static_cast<unsigned int>(
-                std::min(remaining, static_cast<unsigned long long>(batch)));
-            const auto unix_ms = static_cast<unsigned long long>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count());
-            stream_v7<<<static_cast<unsigned int>(blocks), static_cast<unsigned int>(tpb)>>>(
-                states, device_ids, unix_ms, count);
+        unsigned long long offset = 0;
+        while (offset < samples) {
+            const auto count = static_cast<unsigned int>(
+                std::min<unsigned long long>(batch, samples - offset));
+            stream_kernel<<<blocks, tpb>>>(gpu, count, seed, offset, ms);
             CUDA_CHECK(cudaGetLastError());
-            CUDA_CHECK(cudaMemcpy(host_ids.data(), device_ids,
-                                  count * sizeof(RawUuid), cudaMemcpyDeviceToHost));
-            // fwrite can write fewer bytes on a broken pipe; treat it as failure.
-            const size_t written = std::fwrite(host_ids.data(), sizeof(RawUuid), count, stdout);
-            if (written != count || std::fflush(stdout) != 0) {
-                throw std::runtime_error("Failed to stream CUDA UUIDs to parent process");
-            }
-            remaining -= count;
+            CUDA_CHECK(cudaMemcpy(host.data(), gpu, count * sizeof(RawUuid), cudaMemcpyDeviceToHost));
+            if (std::fwrite(host.data(), sizeof(RawUuid), count, stdout) != count)
+                throw std::runtime_error("Broken CUDA stdout pipe");
+            offset += count;
         }
-        CUDA_CHECK(cudaFree(device_ids));
-        CUDA_CHECK(cudaFree(states));
+        if (std::fflush(stdout) != 0) throw std::runtime_error("Cannot flush CUDA stdout");
+        CUDA_CHECK(cudaFree(gpu));
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "CUDA stream error: " << e.what() << '\n';
@@ -137,55 +112,61 @@ int stream_main(int argc, char** argv) {
     }
 }
 
-int main(int argc, char** argv) {
-    if (argc >= 2 && std::string(argv[1]) == "stream") {
-        return stream_main(argc, argv);
+// Host-only vector test: runs on GitHub Actions without an NVIDIA GPU.
+int vectors_main() {
+    constexpr unsigned long long ms = 1729280000000ULL;
+    constexpr RawUuid known[] = {
+        {0x0192a11ec0007e95ULL, 0x88ddbbbeab9cba1bULL},
+        {0x0192a11ec0007103ULL, 0xa03d2985e40305bdULL},
+        {0x0192a11ec00075e3ULL, 0x982863846d2ec95cULL},
+    };
+    for (unsigned long long i = 0; i < 3; i++) {
+        auto result = generate_id(42, i, ms);
+        if (result.hi != known[i].hi || result.lo != known[i].lo) {
+            std::cerr << "CPU/CUDA algorithm mismatch at vector " << i << '\n';
+            return 1;
+        }
     }
-    if (argc != 5) {
-        std::cerr << "Usage: uuid-gpu SECONDS BLOCKS THREADS_PER_BLOCK ITERATIONS\n";
+    std::cout << "All deterministic host vectors match Rust tests\n";
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc >= 2 && std::string(argv[1]) == "vectors") return vectors_main();
+    if (argc >= 2 && std::string(argv[1]) == "stream") return stream_main(argc, argv);
+    if (argc != 7) {
+        std::cerr << "Usage: uuid-gpu SECONDS BLOCKS TPB ITERATIONS SEED TIMESTAMP_MS\n";
         return 2;
     }
     try {
         const unsigned long seconds = std::stoul(argv[1]);
-        const unsigned long blocks = std::stoul(argv[2]);
-        const unsigned long tpb = std::stoul(argv[3]);
-        const unsigned long iterations = std::stoul(argv[4]);
-        if (!seconds || !blocks || !tpb || tpb > 1024 || !iterations) {
+        const unsigned int blocks = static_cast<unsigned int>(std::stoul(argv[2]));
+        const unsigned int tpb = static_cast<unsigned int>(std::stoul(argv[3]));
+        const unsigned int iterations = static_cast<unsigned int>(std::stoul(argv[4]));
+        const unsigned long long seed = std::stoull(argv[5]);
+        const unsigned long long timestamp_ms = std::stoull(argv[6]);
+        if (!seconds || !blocks || !tpb || tpb > 1024 || !iterations)
             throw std::runtime_error("Invalid benchmark parameters");
-        }
+        CUDA_CHECK(cudaSetDevice(0));
         cudaDeviceProp props{};
         CUDA_CHECK(cudaGetDeviceProperties(&props, 0));
-        CUDA_CHECK(cudaSetDevice(0));
-        const size_t nthreads = static_cast<size_t>(blocks) * tpb;
-        State* states = nullptr;
         unsigned long long* checksum = nullptr;
-        CUDA_CHECK(cudaMalloc(&states, nthreads * sizeof(State)));
         CUDA_CHECK(cudaMalloc(&checksum, sizeof(unsigned long long)));
         CUDA_CHECK(cudaMemset(checksum, 0, sizeof(unsigned long long)));
         using Clock = std::chrono::steady_clock;
-        const auto seed = static_cast<unsigned long long>(std::chrono::high_resolution_clock::now().time_since_epoch().count());
-        setup_rng<<<static_cast<unsigned int>(blocks), static_cast<unsigned int>(tpb)>>>(states, seed);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
-        const auto start = Clock::now();
-        const auto duration = std::chrono::seconds(seconds);
+        auto start = Clock::now();
         unsigned long long total = 0;
+        const auto per_kernel = (unsigned long long)blocks * tpb * iterations;
         do {
-            const auto timestamp = static_cast<unsigned long long>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count());
-            generate_v7<<<static_cast<unsigned int>(blocks), static_cast<unsigned int>(tpb)>>>(
-                states, checksum, timestamp, static_cast<unsigned int>(iterations));
+            throughput_kernel<<<blocks, tpb>>>(checksum, seed, total, timestamp_ms, iterations);
             CUDA_CHECK(cudaGetLastError());
             CUDA_CHECK(cudaDeviceSynchronize());
-            total += static_cast<unsigned long long>(nthreads) * iterations;
-        } while (Clock::now() - start < duration);
-        const double elapsed = std::chrono::duration<double>(Clock::now() - start).count();
+            total += per_kernel;
+        } while (Clock::now() - start < std::chrono::seconds(seconds));
+        double elapsed = std::chrono::duration<double>(Clock::now() - start).count();
         unsigned long long host_checksum = 0;
         CUDA_CHECK(cudaMemcpy(&host_checksum, checksum, sizeof(host_checksum), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaFree(states));
         CUDA_CHECK(cudaFree(checksum));
-        // Machine-readable output consumed by the Rust CLI.
         std::cout.precision(9);
         std::cout << "GPU_RESULT|" << total << '|' << elapsed << '|' << host_checksum
                   << '|' << props.name << '\n';
