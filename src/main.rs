@@ -553,55 +553,121 @@ mod tests {
     }
 }
 
+fn make_record_base(opt: &Options) -> report::Record {
+    report::Record {
+        seed: opt.seed,
+        timestamp_ms: opt.timestamp_ms,
+        threads: opt.threads,
+        ..report::Record::default()
+    }
+}
+
+fn measurement(mode: &str, device: &str, data: &ResultData, opt: &Options) -> report::Record {
+    report::Record {
+        mode: mode.into(),
+        device: device.into(),
+        generator: opt.generator.clone(),
+        count: data.count,
+        elapsed_seconds: data.seconds,
+        checksum: data.checksum,
+        gpu_name: if device.contains("GPU") { data.device.clone() } else { String::new() },
+        ..make_record_base(opt)
+    }
+}
+
+fn execute(opt: &Options) -> Result<Vec<report::Record>, String> {
+    let mut records = Vec::new();
+    match opt.mode {
+        Mode::Cpu => {
+            let r = run_cpu(opt.seconds, opt.threads, opt.seed, opt.timestamp_ms, &opt.generator);
+            print_result("CPU", &r);
+            records.push(measurement("cpu", "CPU", &r, opt));
+        }
+        Mode::Gpu => {
+            let r = run_gpu(opt)?;
+            print_result("GPU (SplitMix64 synthetic UUIDv7)", &r);
+            records.push(measurement("gpu", "GPU", &r, opt));
+        }
+        Mode::Hybrid => {
+            let start = Instant::now();
+            let (seconds, threads, seed, timestamp_ms) =
+                (opt.seconds, opt.threads, opt.seed, opt.timestamp_ms);
+            let cpu = thread::spawn(move || run_cpu(seconds, threads, seed, timestamp_ms, "splitmix"));
+            let gpu_result = run_gpu(opt);
+            let cpu = cpu.join().map_err(|_| "CPU worker panicked".to_string())?;
+            let gpu = gpu_result?;
+            print_result("CPU (hybrid)", &cpu);
+            print_result("GPU (hybrid)", &gpu);
+            let combined = ResultData {
+                count: cpu.count + gpu.count,
+                seconds: start.elapsed().as_secs_f64(),
+                checksum: cpu.checksum ^ gpu.checksum,
+                device: "CPU+GPU".into(),
+            };
+            print_result("COMBINED", &combined);
+            records.push(measurement("hybrid", "CPU", &cpu, opt));
+            records.push(measurement("hybrid", "GPU", &gpu, opt));
+            records.push(measurement("hybrid", "CPU+GPU", &combined, opt));
+        }
+        Mode::Probability => {
+            let p = run_probability(opt.rate.expect("validated --rate"), opt.seconds);
+            records.push(report::Record {
+                mode: "probability".into(),
+                generator: "ideal-74-bit-model".into(),
+                count: (opt.rate.unwrap() * opt.seconds as f64) as u64,
+                elapsed_seconds: opt.seconds as f64,
+                probability: p,
+                ..make_record_base(opt)
+            });
+        }
+        Mode::CollisionTest => {
+            records.push(run_collision_test(opt)?);
+        }
+        Mode::CollisionStats => {
+            println!("MONTE CARLO: frozen millisecond, synthetic SplitMix64, entropy bits={}, trials={}",
+                opt.entropy_bits, opt.trials);
+            for s in stats::simulate(&opt.volumes, opt.trials, opt.entropy_bits, opt.seed, opt.timestamp_ms) {
+                println!("volume={} trials={} duplicates={} runs-with-duplicates={}/{} theoretical-P={:.6}%",
+                    s.volume, s.trials, s.collisions, s.trials_with_collision,
+                    s.trials, 100.0 * s.theoretical_probability);
+                records.push(report::Record {
+                    mode: "collision-stats".into(),
+                    device: "CPU".into(),
+                    generator: "splitmix".into(),
+                    count: s.volume as u64 * s.trials as u64,
+                    volume: s.volume,
+                    trials: s.trials,
+                    collisions: s.collisions,
+                    probability: s.theoretical_probability,
+                    ..make_record_base(opt)
+                });
+            }
+        }
+    }
+    Ok(records)
+}
+
 fn main() {
     let opt = match parse() {
         Ok(o) => o,
         Err(e) => { eprintln!("{e}"); std::process::exit(2); }
     };
-    println!("Mode={:?}, duration={}s, CPU threads={}, CUDA blocks={} x threads={} x iterations={}",
-        opt.mode, opt.seconds, opt.threads, opt.blocks, opt.tpb, opt.iterations);
-    let result: Result<(), String> = match opt.mode {
-        Mode::Cpu => {
-            let r = run_cpu(opt.seconds, opt.threads);
-            print_result("CPU", &r);
-            Ok(())
-        }
-        Mode::Gpu => run_gpu(&opt).map(|r| {
-            print_result("GPU (synthetic v7-shaped)", &r);
-            eprintln!("NOTE: CUDA Philox is not a cryptographic generator; no collision test was performed.");
-        }),
-        Mode::CollisionTest => run_collision_test(&opt),
-        Mode::Probability => {
-            run_probability(opt.rate.expect("validated --rate"), opt.seconds);
-            Ok(())
-        }
-        Mode::Hybrid => {
-            // Both measurements run concurrently, not sequentially.
-            let started = Instant::now();
-            let seconds = opt.seconds;
-            let threads = opt.threads;
-            let cpu = thread::spawn(move || run_cpu(seconds, threads));
-            let gpu = run_gpu(&opt);
-            let cpu = cpu.join().expect("CPU worker panicked");
-            print_result("CPU (hybrid)", &cpu);
-            match gpu {
-                Ok(g) => {
-                    print_result("GPU (hybrid, synthetic v7-shaped)", &g);
-                    let wall = started.elapsed().as_secs_f64();
-                    print_result("COMBINED", &ResultData {
-                        count: cpu.count + g.count,
-                        seconds: wall,
-                        checksum: cpu.checksum ^ g.checksum,
-                    });
-                    eprintln!("NOTE: CPU and GPU measure different generators. No collision test was performed.");
-                    Ok(())
+    println!("Mode={:?}, duration={}s, threads={}, CUDA={}x{}x{}, generator={}, seed={}, timestamp_ms={}",
+        opt.mode, opt.seconds, opt.threads, opt.blocks, opt.tpb, opt.iterations,
+        opt.generator, opt.seed, opt.timestamp_ms);
+    if opt.generator == "splitmix" {
+        eprintln!("NOTE: SplitMix64 is deterministic and NON-CRYPTOGRAPHIC. Synthetic UUIDv7-shaped IDs; do not use as production UUIDs.");
+    }
+    match execute(&opt) {
+        Ok(records) => {
+            if let Some(path) = &opt.output {
+                if let Err(e) = report::export(path, &records) {
+                    eprintln!("EXPORT ERROR: {e}");
+                    std::process::exit(1);
                 }
-                Err(e) => Err(e),
+                println!("Exported {} records to {path}", records.len());
             }
         }
-    };
-    if let Err(e) = result {
-        eprintln!("ERROR: {e}");
-        std::process::exit(1);
+        Err(e) => { eprintln!("ERROR: {e}"); std::process::exit(1); }
     }
 }
