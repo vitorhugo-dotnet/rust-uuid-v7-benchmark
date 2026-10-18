@@ -112,7 +112,27 @@ int stream_main(int argc, char** argv) {
     }
 }
 
+// Host-only vector test: runs on GitHub Actions without an NVIDIA GPU.
+int vectors_main() {
+    constexpr unsigned long long ms = 1729280000000ULL;
+    constexpr RawUuid known[] = {
+        {0x0192a11ec0007e95ULL, 0x88ddbbbeab9cba1bULL},
+        {0x0192a11ec0007103ULL, 0xa03d2985e40305bdULL},
+        {0x0192a11ec00075e3ULL, 0x982863846d2ec95cULL},
+    };
+    for (unsigned long long i = 0; i < 3; i++) {
+        auto result = generate_id(42, i, ms);
+        if (result.hi != known[i].hi || result.lo != known[i].lo) {
+            std::cerr << "CPU/CUDA algorithm mismatch at vector " << i << '\\n';
+            return 1;
+        }
+    }
+    std::cout << "All deterministic host vectors match Rust tests\\n";
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::string(argv[1]) == "vectors") return vectors_main();
     if (argc >= 2 && std::string(argv[1]) == "stream") return stream_main(argc, argv);
     if (argc != 7) {
         std::cerr << "Usage: uuid-gpu SECONDS BLOCKS TPB ITERATIONS SEED TIMESTAMP_MS\n";
