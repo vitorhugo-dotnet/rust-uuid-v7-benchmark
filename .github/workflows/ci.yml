@@ -58,10 +58,15 @@ jobs:
         with:
           arch: x64
       - uses: Jimver/cuda-toolkit@v0.2.36
+        if: runner.os == 'Linux'
         with:
           cuda: '12.8.0'
           method: network
-          sub-packages: ${{ runner.os == 'Windows' && '["nvcc","cudart","cudart_dev"]' || '["nvcc","cudart","cudart-dev"]' }}
+          sub-packages: '["nvcc","cudart","cudart-dev"]'
+      - name: Install minimal NVIDIA CUDA 12.8 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/setup-cuda-windows.ps1
       - name: Windows CUDA build / host parity vectors
         if: runner.os == 'Windows'
         shell: pwsh
