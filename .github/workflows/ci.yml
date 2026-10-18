@@ -42,3 +42,37 @@ jobs:
             cpu.json
             stats.csv
           if-no-files-found: error
+
+  cuda:
+    name: CUDA compile / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '12.8.0'
+          method: network
+          sub-packages: ${{ runner.os == 'Windows' && '["nvcc","cudart","cudart_dev"]' || '["nvcc","cudart","cudart-dev"]' }}
+      - name: Windows CUDA build / host parity vectors
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./build-windows.ps1
+          if (-not (Test-Path target/release/uuid-gpu.exe)) { throw "CUDA missing" }
+          ./target/release/uuid-gpu.exe vectors
+      - name: Linux CUDA build / host parity vectors
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bash ./build-linux.sh
+          test -f target/release/uuid-gpu
+          ./target/release/uuid-gpu vectors
