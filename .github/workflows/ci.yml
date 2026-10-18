@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust tests / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test and build
+        run: |
+          cargo test --locked
+          cargo build --release --locked
+      - name: CPU smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\target\release\uuid-v7-bench.exe cpu --seconds 1 --threads 2 --seed 42 --timestamp-ms 1729280000000 --output cpu.json
+          .\target\release\uuid-v7-bench.exe collision-stats --volumes 100,1000 --trials 2 --entropy-bits 12 --output stats.csv
+      - name: CPU smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          ./target/release/uuid-v7-bench cpu --seconds 1 --threads 2 --seed 42 --timestamp-ms 1729280000000 --output cpu.json
+          ./target/release/uuid-v7-bench collision-stats --volumes 100,1000 --trials 2 --entropy-bits 12 --output stats.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: |
+            cpu.json
+            stats.csv
+          if-no-files-found: error
