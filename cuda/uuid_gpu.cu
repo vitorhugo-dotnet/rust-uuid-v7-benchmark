@@ -123,11 +123,11 @@ int vectors_main() {
     for (unsigned long long i = 0; i < 3; i++) {
         auto result = generate_id(42, i, ms);
         if (result.hi != known[i].hi || result.lo != known[i].lo) {
-            std::cerr << "CPU/CUDA algorithm mismatch at vector " << i << '\\n';
+            std::cerr << "CPU/CUDA algorithm mismatch at vector " << i << '\n';
             return 1;
         }
     }
-    std::cout << "All deterministic host vectors match Rust tests\\n";
+    std::cout << "All deterministic host vectors match Rust tests\n";
     return 0;
 }
 
