@@ -17,11 +17,9 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-      - uses: Jimver/cuda-toolkit@v0.2.36
-        with:
-          cuda: '12.8.0'
-          method: network
-          sub-packages: '["nvcc","cudart","cudart_dev"]'
+      - name: Install minimal NVIDIA CUDA 12.8 (Windows)
+        shell: pwsh
+        run: ./.github/scripts/setup-cuda-windows.ps1
       - name: Test and build Windows + CUDA
         shell: pwsh
         run: |
