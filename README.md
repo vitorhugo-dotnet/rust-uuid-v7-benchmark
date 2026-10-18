@@ -131,7 +131,7 @@ The CUDA standalone executable lives beside the Rust CLI. For a host-side shared
 
 ## CI / Releases
 
-- [CI](.github/workflows/ci.yml): `cargo test --locked`, Windows/Linux release builds of the Rust CLI, and JSON/CSV smoke tests. Runs on pull requests and pushes to `main`.
+- [CI](.github/workflows/ci.yml): `cargo test --locked`, Windows/Linux release builds of the Rust CLI, JSON/CSV smoke tests, plus **CUDA compilation and host-only parity-vector verification on both operating systems**. Runs on pull requests and pushes to `main`.
 - [Release](.github/workflows/release.yml): on a `v*` tag, builds the Rust CLI and CUDA companion on **both operating systems**, validates CUDA's CPU-side known vectors, and uploads the finished archives to GitHub Releases.
 - Release requires CUDA Toolkit installation by GitHub-hosted runners; runner compatibility and downloads can fail independently of the Rust implementation. Validate the workflow before advertising a version as published.
 
