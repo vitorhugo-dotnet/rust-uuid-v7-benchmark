@@ -91,15 +91,14 @@ struct ResultData {
 }
 
 fn usage() -> &'static str {
-    "Usage: uuid-v7-bench <cpu|gpu|hybrid|probability|collision-test|collision-stats> [--seconds N] [--threads N] [--blocks N] [--tpb N] [--iterations N] [--rate N] [--seed N] [--timestamp-ms N] [--output PATH]\n\
-     Example: uuid-v7-bench cpu --seconds 10 --threads 12\n\
-     Example: uuid-v7-bench gpu --seconds 10\n\
-     Example: uuid-v7-bench hybrid --seconds 10 --threads 6\n\
-     Example: uuid-v7-bench probability --rate 145000000000 --seconds 1200\n\
-     Example: uuid-v7-bench collision-test --source hybrid --samples 250000 --threads 6\n\
-     Collision options: --source cpu|gpu|hybrid --samples N (per device) --batch N --entropy-bits 1..74\n\\
-     Monte Carlo: collision-stats --volumes 1000,10000,100000 --trials 10 --entropy-bits 16\n\\
-     Fair compute workload: --generator splitmix (default). CPU library: cpu --generator uuid"
+    concat!(
+        "Usage: uuid-v7-bench <cpu|gpu|hybrid|probability|collision-test|collision-stats> [OPTIONS]\\n",
+        "  --seconds N --threads N --blocks N --tpb N --iterations N\\n",
+        "  --generator splitmix|uuid --seed N --timestamp-ms N --output results.json|results.csv\\n",
+        "  collision-test --source cpu|gpu|hybrid --samples N --batch N --entropy-bits 1..74\\n",
+        "  collision-stats --volumes 1000,10000,100000 --trials 10 --entropy-bits 16\\n",
+        "  probability --rate 145000000000 --seconds 1200\\n"
+    )
 }
 
 fn parse() -> Result<Options, String> {
