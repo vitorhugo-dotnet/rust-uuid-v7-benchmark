@@ -1,0 +1,8 @@
+[package]
+name = "uuid-v7-bench"
+version = "0.1.0"
+edition = "2021"
+description = "UUID v7 CPU / CUDA GPU benchmark"
+
+[dependencies]
+uuid = { version = "1.26.1", features = ["v7"] }
