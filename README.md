@@ -1,7 +1,7 @@
 # Rust UUID v7 CPU / CUDA Benchmark
 
 [![CI](https://github.com/vitorhugo-dotnet/rust-uuid-v7-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/vitorhugo-dotnet/rust-uuid-v7-benchmark/actions/workflows/ci.yml)
-[![Release](https://github.com/vitorhugo-dotnet/rust-uuid-v7-benchmark/actions/workflows/release.yml/badge.svg)](https://github.com/vitorhugo-dotnet/rust-uuid-v7-benchmark/releases)
+[![Releases](https://img.shields.io/github/v/release/vitorhugo-dotnet/rust-uuid-v7-benchmark?label=release)](https://github.com/vitorhugo-dotnet/rust-uuid-v7-benchmark/releases)
 
 A cross-platform Rust CLI for experimenting with UUIDv7-shaped ID generation, CPU/CUDA parallelism, reproducible workloads, birthday-bound probabilities, and exact sampled collision detection.
 
@@ -74,7 +74,7 @@ Both scripts compile the Rust executable even if `nvcc` is unavailable, and comp
 
 ### Prebuilt releases
 
-For tags named `v*`, [GitHub Actions releases](https://github.com/vitorhugo-dotnet/rust-uuid-v7-benchmark/releases) are configured to build **Windows x64 ZIP** and **Linux x64 tar.gz** archives containing the Rust CLI and the CUDA companion executable. Publishing only occurs after **both** build jobs succeed. GitHub-hosted runners compile CUDA and test deterministic host vectors; they do not run a GPU benchmark without physical NVIDIA hardware.
+On every successful CI run triggered by a push to `main`, [GitHub Releases](https://github.com/vitorhugo-dotnet/rust-uuid-v7-benchmark/releases) automatically receives **Windows x64 ZIP** and **Linux x64 tar.gz** archives containing both the Rust CLI and CUDA companion. The final `publish` job waits for **Rust and CUDA builds on both platforms**. GitHub-hosted runners compile CUDA and check deterministic host vectors without physical NVIDIA GPUs. A manual CI `workflow_dispatch` on `main` also publishes a release. Versions use `v0.2.<CI run number>`, so numbers may have gaps due to pull-request runs.
 
 ## Commands
 
@@ -132,17 +132,10 @@ The CUDA standalone executable lives beside the Rust CLI. For a host-side shared
 ## CI / Releases
 
 - [CI](.github/workflows/ci.yml): `cargo test --locked`, Windows/Linux release builds of the Rust CLI, JSON/CSV smoke tests, plus **CUDA compilation and host-only parity-vector verification on both operating systems**. Runs on pull requests and pushes to `main`.
-- [Release](.github/workflows/release.yml): on a `v*` tag, builds the Rust CLI and CUDA companion on **both operating systems**, validates CUDA's CPU-side known vectors, and uploads the finished archives to GitHub Releases.
+- The **last `publish` job of [CI](.github/workflows/ci.yml)** downloads the verified Windows and Linux archives and creates the release automatically on successful `main` pushes (or manual dispatch on `main`). The old tag-triggered release workflow was removed to prevent duplicate releases.
 - Release requires CUDA Toolkit installation by GitHub-hosted runners; runner compatibility and downloads can fail independently of the Rust implementation. Validate the workflow before advertising a version as published.
 
-To publish **after the PR is merged and CI is green**:
-
-```bash
-git checkout main
-git pull --ff-only
-git tag v0.2.0
-git push origin v0.2.0
-```
+Publishing is automatic after a successful CI run on `main`. No manual Git tag or release creation is required. See [CI runs](https://github.com/vitorhugo-dotnet/rust-uuid-v7-benchmark/actions/workflows/ci.yml) or [Releases](https://github.com/vitorhugo-dotnet/rust-uuid-v7-benchmark/releases).
 
 ## References
 

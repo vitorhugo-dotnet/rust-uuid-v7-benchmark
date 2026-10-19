@@ -81,3 +81,61 @@ jobs:
           bash ./build-linux.sh
           test -f target/release/uuid-gpu
           ./target/release/uuid-gpu vectors
+      - name: Package Windows x86_64
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/uuid-v7-bench.exe dist/
+          Copy-Item target/release/uuid-gpu.exe dist/
+          Copy-Item README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath uuid-v7-benchmark-windows-x86_64.zip -Force
+      - name: Package Linux x86_64
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/uuid-v7-bench target/release/uuid-gpu README.md dist/
+          chmod +x dist/uuid-v7-bench dist/uuid-gpu
+          tar -czf uuid-v7-benchmark-linux-x86_64.tar.gz -C dist .
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ runner.os }}-x86_64
+          path: |
+            uuid-v7-benchmark-windows-x86_64.zip
+            uuid-v7-benchmark-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish Windows + Linux GitHub Release
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [rust, cuda]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
+      - name: Verify both archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s artifacts/uuid-v7-benchmark-windows-x86_64.zip
+          test -s artifacts/uuid-v7-benchmark-linux-x86_64.tar.gz
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.2.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          name: v0.2.${{ github.run_number }} (Windows + Linux)
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          make_latest: true
+          files: |
+            artifacts/uuid-v7-benchmark-windows-x86_64.zip
+            artifacts/uuid-v7-benchmark-linux-x86_64.tar.gz
